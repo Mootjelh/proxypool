@@ -1,0 +1,15 @@
+# Binaries
+bin/
+*.exe
+*.test
+
+# Go
+testdata/fuzz/
+vendor/
+*.out
+
+# NEVER commit a real proxy list — it contains credentials
+proxies.txt
+proxies*.txt
+*.csv
+scratch/
