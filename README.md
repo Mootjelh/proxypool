@@ -1,7 +1,7 @@
 # proxypool
 
+[![CI](https://github.com/Mootjelh/proxypool/actions/workflows/ci.yml/badge.svg)](https://github.com/Mootjelh/proxypool/actions/workflows/ci.yml)
 [![Go Reference](https://pkg.go.dev/badge/github.com/Mootjelh/proxypool.svg)](https://pkg.go.dev/github.com/Mootjelh/proxypool)
-[![Go Report Card](https://goreportcard.com/badge/github.com/Mootjelh/proxypool)](https://goreportcard.com/report/github.com/Mootjelh/proxypool)
 
 A rotating proxy pool with cooldowns, for Go.
 
@@ -9,14 +9,14 @@ No dependencies. No background goroutines. Safe for concurrent use.
 
 ## Why
 
-Every project that runs more than one proxy rewrites the same four things, each individually trivial and collectively a morning:
+Every project that runs more than one proxy ends up rewriting the same four things, each of them small and collectively a morning:
 
-- providers emit at least four different line formats, and **none of them is the URL an HTTP client accepts**
-- a blocked address should stop being handed out for a while, then come back on its own
-- credentials must never reach a log
-- when every address is cooling down, the caller needs to be *told* rather than handed one anyway
+* providers emit at least four different line formats, and none of them is the URL an HTTP client accepts
+* a blocked address should stop being handed out for a while, then come back on its own
+* credentials must never reach a log
+* when every address is cooling down, the caller needs to be told rather than handed one anyway
 
-That is the whole scope. There are no health checks and no scoring, because whether an address is usable is something only your own traffic can answer — a liveness probe that passes proves nothing about the request you actually care about.
+That's the whole scope. There are no health checks and no scoring, because whether an address is usable is something only your own traffic can answer. A liveness probe that passes proves nothing about the request you actually care about.
 
 ## Install
 
@@ -67,15 +67,15 @@ for {
 | `user:pass@1.2.3.4:8080` | `http://user:pass@1.2.3.4:8080` |
 | `socks5://user:pass@host:1080` | unchanged |
 
-`Load` reads a file of them, skipping blanks and `#` comments. **A line it cannot parse is an error naming the line number**, not a silent skip — a proxy list is configuration, and quietly running on nine of ten addresses is worse than not starting at all.
+`Load` reads a file of them, skipping blank lines and `#` comments. A line it can't parse is an error naming the line number rather than a silent skip. A proxy list is configuration, and quietly running on nine of ten addresses is worse than not starting at all.
 
-## Two things this gets right that are easy to get wrong
+## Two details that are easy to get wrong
 
 ### Logging a pool whose entries share a host
 
-Credentials must be stripped from logs. But sticky residential pools give every entry the **same `host:port`** and vary only the username, which is what encodes the session. Strip the credentials and a pool of a thousand prints as one line, repeated — so a log showing a healthy rotation is indistinguishable from a log showing every request pinned to one address.
+Credentials have to be stripped from logs. But sticky residential pools give every entry the same `host:port` and vary only the username, which is what encodes the session. Strip the credentials and a pool of a thousand prints as one line repeated, so a log showing a healthy rotation looks identical to a log showing every request pinned to one address.
 
-`Proxy.String()` therefore keeps the index:
+`Proxy.String()` keeps the index for that reason:
 
 ```
 pool#0 gw.example.com:5555
@@ -85,22 +85,22 @@ pool#2 gw.example.com:5555
 
 ### The BOM in your proxy list
 
-PowerShell's `Out-File` and `Set-Content` write UTF-8 **with a BOM** by default. Those three invisible bytes attach to the first address only, so `gw.example.com` becomes a hostname that does not resolve — and it presents as that one proxy being dead, which is exactly the kind of thing you would never think to check.
+PowerShell's `Out-File` and `Set-Content` write UTF-8 with a BOM by default. Those three invisible bytes attach to the first address only, so `gw.example.com` becomes a hostname that doesn't resolve, and it presents as that one proxy being dead. Not the sort of thing you'd think to check.
 
-`Load` strips it. There is a test for it.
+`Load` strips it, and there's a test for it.
 
-## Ordering matters in the parser, and here is why
+## Why the parser checks field count first
 
-A password may legitimately contain an `@`. So `host:port:user:p@ss` gets checked by **field count before** anything searches for an `@` — otherwise it is read as `user:pass@host:port` and yields a URL pointing at a host that was never in your file.
+A password can legitimately contain an `@`. So `host:port:user:p@ss` is checked by field count before anything searches for an `@`, otherwise it reads as `user:pass@host:port` and yields a URL pointing at a host that was never in your file.
 
-Field count is unambiguous where a character search is not. This one is pinned by a test, because it is the sort of thing a later refactor "simplifies" straight back into a bug.
+Field count is unambiguous where a character search isn't. There's a test on this one, because it's the sort of thing a later refactor simplifies straight back into a bug.
 
-## What it does not do
+## What it doesn't do
 
-- **No health checking.** Use your own traffic.
-- **No per-request retry.** That is your control flow, not the pool's.
-- **No SOCKS dialer.** `Proxy.Transport()` hands `socks5://` URLs to `net/http`, which does support them; anything more exotic is yours to build from `Proxy.URL`.
-- **No rotation strategies beyond round robin.** If you want one address pinned per long-lived session, use `Pool.All()` and index it yourself — that is a different strategy and stacking it on `Next()` gets you neither.
+* No health checking. Use your own traffic.
+* No per-request retry. That's your control flow, not the pool's.
+* No SOCKS dialer. `Proxy.Transport()` hands `socks5://` URLs to `net/http`, which supports them. Anything more exotic is yours to build from `Proxy.URL`.
+* No rotation strategies beyond round robin. If you want one address pinned per long-lived session, use `Pool.All()` and index it yourself. That's a different strategy, and stacking it on `Next()` gets you neither.
 
 ## License
 

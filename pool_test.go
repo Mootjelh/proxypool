@@ -217,7 +217,7 @@ func TestMaskRemovesCredentials(t *testing.T) {
 //
 // A rotating residential pool typically gives every entry the same host:port
 // and varies only the username, which encodes the sticky session. Masking the
-// credentials — which is mandatory — makes them all print identically, so a log
+// credentials, which is mandatory, makes them all print identically, so a log
 // showing a working rotation is indistinguishable from one showing a pool stuck
 // on a single address.
 func TestStringDisambiguatesSharedHosts(t *testing.T) {

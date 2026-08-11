@@ -46,7 +46,7 @@ type entry struct {
 // Proxy is one address from the pool.
 type Proxy struct {
 	// URL is the full proxy URL, credentials included. Pass it to your HTTP
-	// client — and do not log it. Use the Proxy itself for that.
+	// client, and do not log it. Use the Proxy itself for that.
 	URL string
 
 	// Index is the address's stable position in the pool, counting from 0.
@@ -60,7 +60,7 @@ func (p Proxy) IsDirect() bool { return p.URL == "" }
 //
 // The index is not decoration. Rotating residential pools typically give every
 // entry the SAME host:port and vary only the username, which encodes the sticky
-// session. Strip the credentials — which you must — and a pool of a thousand
+// session. Strip the credentials, which you must, and a pool of a thousand
 // addresses prints as one, so a log that says the rotation is working looks
 // exactly like a log that says it is not.
 func (p Proxy) String() string {
@@ -88,7 +88,7 @@ func (p Proxy) Transport() (*http.Transport, error) {
 // New builds a pool from already-normalised proxy URLs.
 //
 // An empty slice, or a slice containing one empty string, means "connect
-// directly" — so a caller that has no proxies configured can use the same code
+// directly", so a caller that has no proxies configured can use the same code
 // path as one that does, rather than branching everywhere.
 func New(urls []string) *Pool {
 	if len(urls) == 0 {
@@ -123,7 +123,7 @@ func Load(path string) (*Pool, error) {
 		// BOM by default, so a proxy list produced on Windows has three
 		// invisible bytes glued to the FIRST address. That turns
 		// "gw.example.com" into "\ufeffgw.example.com", which is a different
-		// hostname — and the failure is silent, affects exactly one entry, and
+		// hostname. The failure is silent, affects exactly one entry, and
 		// presents as that one proxy being dead.
 		//
 		// The BOM is written as an escape rather than a literal here because a
@@ -200,7 +200,7 @@ func Normalize(raw string) (string, error) {
 // Next returns the proxy to use for the next request.
 //
 // The bool reports whether it is currently healthy. When every proxy is cooling
-// down it returns the one that recovers soonest, with false — the caller is
+// down it returns the one that recovers soonest, with false. The caller is
 // better placed than the pool to decide between waiting, proceeding anyway and
 // giving up.
 func (p *Pool) Next() (Proxy, bool) {
@@ -276,7 +276,7 @@ func (p *Pool) Healthy() int {
 
 // All returns every proxy in the pool, in file order, regardless of cooldown.
 //
-// Use it when you want the list rather than the picker — for instance to pin
+// Use it when you want the list rather than the picker, for instance to pin
 // one address per long-lived session, which is a different rotation strategy
 // from this pool's per-request round robin and should not be built on top of
 // [Pool.Next].

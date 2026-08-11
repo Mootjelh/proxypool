@@ -12,8 +12,8 @@ import (
 // complains, and let it come back on its own.
 //
 // Note what the log lines look like. All three entries share one host:port and
-// differ only in the username — which is how sticky residential pools work —
-// so the index is the only thing that tells them apart once the credentials are
+// differ only in the username, which is how sticky residential pools work, so
+// the index is the only thing that tells them apart once the credentials are
 // stripped.
 func Example() {
 	pool := proxypool.New([]string{
