@@ -19,6 +19,16 @@ jobs:
         os: [ubuntu-latest, windows-latest, macos-latest]
         # 1.21 is the minimum go.mod claims. Testing it keeps that claim true.
         go: ['1.21', 'stable']
+    env:
+      # Importing net/http enables cgo on macOS, which sends the build through
+      # the external linker. Go 1.21 does not emit an LC_UUID load command on
+      # that path, and the dyld on current arm64 macOS runners refuses to start
+      # such a binary: "missing LC_UUID load command", abort trap. It is a
+      # toolchain and OS incompatibility, not a cgo dependency of this package,
+      # which resolves no hostnames of its own and needs none of it.
+      #
+      # The race job below leaves cgo alone, because -race wants it.
+      CGO_ENABLED: '0'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
