@@ -210,6 +210,14 @@ func (p *Pool) Next() (Proxy, bool) {
 	now := time.Now()
 	n := len(p.entries)
 
+	// An empty pool is reachable through Remove and Replace. It reports a
+	// direct entry with false, which the caller must not read as "connect
+	// directly": the bool is the whole answer, and here it means there is
+	// nothing left to hand out.
+	if n == 0 {
+		return Proxy{Index: -1}, false
+	}
+
 	for i := 0; i < n; i++ {
 		idx := p.idx % n
 		e := p.entries[idx]
@@ -250,6 +258,123 @@ func (p *Pool) Block(pr Proxy, d time.Duration) {
 			return
 		}
 	}
+}
+
+// --- changing the list ------------------------------------------------------
+
+// Add appends addresses, normalising each one the way [Load] does, and reports
+// how many were new.
+//
+// Addresses already in the pool are skipped rather than appended twice. A
+// duplicate is not harmless: round robin would hand it out twice per cycle, so
+// that address would quietly take a double share of the traffic and reach a
+// rate limit first.
+//
+// If any address cannot be parsed, nothing is added and the error names it.
+// Adding nine of ten silently is the failure mode [Load] already refuses.
+func (p *Pool) Add(raw ...string) (int, error) {
+	urls, err := normalizeAll(raw)
+	if err != nil {
+		return 0, err
+	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	have := make(map[string]bool, len(p.entries))
+	for _, e := range p.entries {
+		have[e.url] = true
+	}
+
+	added := 0
+	for _, u := range urls {
+		if have[u] {
+			continue
+		}
+		have[u] = true
+		p.entries = append(p.entries, &entry{url: u})
+		added++
+	}
+	return added, nil
+}
+
+// Remove drops an address and reports whether it was there. It can be passed in
+// any format [Normalize] accepts.
+//
+// It also matches the string verbatim, and that is not belt and braces. [New]
+// takes its addresses as given, so a pool can hold something Normalize would
+// reject, and matching only the normalised form would leave that entry in the
+// pool with no way to take it out.
+//
+// Removing the last entry leaves an empty pool, and [Pool.Next] then reports
+// unhealthy rather than panicking.
+func (p *Pool) Remove(raw string) bool {
+	verbatim := strings.TrimSpace(raw)
+	normalised, err := Normalize(raw)
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	for i, e := range p.entries {
+		if e.url == verbatim || (err == nil && e.url == normalised) {
+			p.entries = append(p.entries[:i], p.entries[i+1:]...)
+			return true
+		}
+	}
+	return false
+}
+
+// Replace swaps the whole list, keeping the cooldown of every address that
+// survives the swap.
+//
+// This is what a provider handing out a fresh list every so often needs.
+// Building a second Pool would do the swap too, and would forget that four of
+// those addresses were blocked a minute ago: they would go straight back into
+// rotation, be refused again, and the pool would relearn the same thing every
+// time the list refreshed.
+//
+// If any address cannot be parsed, the pool is left untouched.
+func (p *Pool) Replace(raw []string) error {
+	urls, err := normalizeAll(raw)
+	if err != nil {
+		return err
+	}
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	cooldown := make(map[string]time.Time, len(p.entries))
+	for _, e := range p.entries {
+		cooldown[e.url] = e.blockedUntil
+	}
+
+	entries := make([]*entry, 0, len(urls))
+	seen := make(map[string]bool, len(urls))
+	for _, u := range urls {
+		if seen[u] {
+			continue
+		}
+		seen[u] = true
+		entries = append(entries, &entry{url: u, blockedUntil: cooldown[u]})
+	}
+
+	p.entries = entries
+	p.idx = 0
+	return nil
+}
+
+// normalizeAll converts every entry or returns the first error, so that a
+// caller either gets the whole list or none of it.
+func normalizeAll(raw []string) ([]string, error) {
+	out := make([]string, 0, len(raw))
+	for i, r := range raw {
+		u, err := Normalize(r)
+		if err != nil {
+			return nil, fmt.Errorf("entry %d: %w", i, err)
+		}
+		out = append(out, u)
+	}
+	return out, nil
 }
 
 // Len is the total number of proxies in the pool.

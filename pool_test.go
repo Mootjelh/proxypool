@@ -329,3 +329,214 @@ func TestConcurrentNextAndBlock(t *testing.T) {
 		<-done
 	}
 }
+
+// --- changing the list -------------------------------------------------------
+
+func TestAdd(t *testing.T) {
+	p := New([]string{"http://1.2.3.4:8080"})
+
+	n, err := p.Add("5.6.7.8:9090", "gw.example.com:7000:user:pass")
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if n != 2 {
+		t.Errorf("Add returned %d, want 2", n)
+	}
+	if p.Len() != 3 {
+		t.Errorf("Len() = %d, want 3", p.Len())
+	}
+
+	urls := p.URLs()
+	if urls[1] != "http://5.6.7.8:9090" {
+		t.Errorf("added entry = %q, want it normalised", urls[1])
+	}
+}
+
+// A duplicate would take a double share of the traffic, because round robin
+// hands it out once per copy.
+func TestAddSkipsDuplicates(t *testing.T) {
+	p := New([]string{"http://1.2.3.4:8080"})
+
+	n, err := p.Add("1.2.3.4:8080", "http://1.2.3.4:8080", "5.6.7.8:9090")
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("Add returned %d, want 1 (two of three were already present)", n)
+	}
+	if p.Len() != 2 {
+		t.Errorf("Len() = %d, want 2", p.Len())
+	}
+}
+
+func TestAddRejectsTheWholeBatch(t *testing.T) {
+	p := New([]string{"http://1.2.3.4:8080"})
+
+	if _, err := p.Add("5.6.7.8:9090", "nonsense:a:b"); err == nil {
+		t.Fatal("expected an error naming the bad entry")
+	}
+	if p.Len() != 1 {
+		t.Errorf("Len() = %d, want 1: a batch with a bad entry must add nothing", p.Len())
+	}
+}
+
+func TestRemove(t *testing.T) {
+	p := New([]string{"http://1.2.3.4:8080", "http://5.6.7.8:9090"})
+
+	// Any format Normalize accepts resolves to the same address.
+	if !p.Remove("1.2.3.4:8080") {
+		t.Error("Remove reported the address was absent")
+	}
+	if p.Len() != 1 {
+		t.Fatalf("Len() = %d, want 1", p.Len())
+	}
+	if p.Remove("9.9.9.9:1") {
+		t.Error("Remove reported an address that was never there")
+	}
+}
+
+func TestRemovingTheLastEntryDoesNotPanic(t *testing.T) {
+	p := New([]string{"http://1.2.3.4:8080"})
+
+	if !p.Remove("1.2.3.4:8080") {
+		t.Fatal("Remove failed")
+	}
+	if p.Len() != 0 {
+		t.Fatalf("Len() = %d, want 0", p.Len())
+	}
+
+	pr, healthy := p.Next()
+	if healthy {
+		t.Error("an empty pool must report unhealthy")
+	}
+	if pr.Index != -1 {
+		t.Errorf("Index = %d, want -1 to mark an entry that came from nowhere", pr.Index)
+	}
+	if p.Healthy() != 0 {
+		t.Errorf("Healthy() = %d, want 0", p.Healthy())
+	}
+}
+
+// Block resolves a Proxy by index first. Once entries can be removed, an index
+// a caller is still holding can point at a different address, and blocking the
+// wrong one is silent: the intended address keeps being handed out and the
+// innocent one goes quiet.
+func TestAHeldProxyStillBlocksItsOwnAddress(t *testing.T) {
+	p := New([]string{"a", "b", "c"})
+
+	p.Next()            // a
+	held, _ := p.Next() // b, at index 1
+	if held.URL != "b" || held.Index != 1 {
+		t.Fatalf("fixture: held = %+v, want b at index 1", held)
+	}
+
+	// After this, index 1 is "c".
+	p.Remove("a")
+
+	p.Block(held, time.Hour)
+
+	if p.Healthy() != 1 {
+		t.Fatalf("Healthy() = %d, want 1", p.Healthy())
+	}
+	for i := 0; i < 5; i++ {
+		pr, healthy := p.Next()
+		if !healthy {
+			t.Fatal("expected c to still be healthy")
+		}
+		if pr.URL != "c" {
+			t.Fatalf("Next() = %q, want c: the wrong address was blocked", pr.URL)
+		}
+	}
+}
+
+func TestReplaceKeepsCooldowns(t *testing.T) {
+	p := New([]string{"http://a:1", "http://b:1", "http://c:1"})
+
+	pr, _ := p.Next() // a
+	p.Block(pr, time.Hour)
+	if p.Healthy() != 2 {
+		t.Fatalf("Healthy() = %d, want 2 before the swap", p.Healthy())
+	}
+
+	// a survives the swap and must still be cooling down; d is new.
+	if err := p.Replace([]string{"http://a:1", "http://c:1", "http://d:1"}); err != nil {
+		t.Fatalf("Replace: %v", err)
+	}
+
+	if p.Len() != 3 {
+		t.Fatalf("Len() = %d, want 3", p.Len())
+	}
+	if p.Healthy() != 2 {
+		t.Errorf("Healthy() = %d, want 2: a was blocked and survived the swap", p.Healthy())
+	}
+	for i := 0; i < 6; i++ {
+		pr, healthy := p.Next()
+		if healthy && pr.URL == "http://a:1" {
+			t.Fatal("a came back into rotation despite its cooldown")
+		}
+	}
+}
+
+func TestReplaceDropsWhatIsGone(t *testing.T) {
+	p := New([]string{"a", "b"})
+
+	if err := p.Replace([]string{"http://c:1"}); err != nil {
+		t.Fatalf("Replace: %v", err)
+	}
+	if p.Len() != 1 {
+		t.Fatalf("Len() = %d, want 1", p.Len())
+	}
+	if got := p.URLs()[0]; got != "http://c:1" {
+		t.Errorf("URLs()[0] = %q, want the new list", got)
+	}
+}
+
+func TestReplaceRejectsBadInputWithoutTouchingThePool(t *testing.T) {
+	p := New([]string{"http://a:1", "http://b:1"})
+
+	if err := p.Replace([]string{"http://c:1", "nonsense:a:b"}); err == nil {
+		t.Fatal("expected an error")
+	}
+	if p.Len() != 2 {
+		t.Errorf("Len() = %d, want 2: a failed Replace must change nothing", p.Len())
+	}
+	if got := p.URLs()[0]; got != "http://a:1" {
+		t.Errorf("URLs()[0] = %q, want the original list", got)
+	}
+}
+
+func TestConcurrentMutation(t *testing.T) {
+	p := New([]string{"http://a:1", "http://b:1", "http://c:1", "http://d:1"})
+
+	done := make(chan struct{})
+	for i := 0; i < 4; i++ {
+		go func(i int) {
+			defer func() { done <- struct{}{} }()
+			for j := 0; j < 100; j++ {
+				pr, _ := p.Next()
+				p.Block(pr, time.Millisecond)
+				_, _ = p.Add("http://e:1", "http://f:1")
+				p.Remove("http://e:1")
+				_ = p.Replace([]string{"http://a:1", "http://b:1", "http://c:1", "http://d:1"})
+				_ = p.Healthy()
+				_ = p.Len()
+			}
+		}(i)
+	}
+	for i := 0; i < 4; i++ {
+		<-done
+	}
+}
+
+// New takes addresses as given, so a pool can hold a string Normalize would
+// reject. Matching only the normalised form would strand it there.
+func TestRemoveMatchesVerbatimEntries(t *testing.T) {
+	p := New([]string{"a", "b"})
+
+	if !p.Remove("a") {
+		t.Fatal("Remove could not find an entry that New accepted verbatim")
+	}
+	if p.Len() != 1 {
+		t.Errorf("Len() = %d, want 1", p.Len())
+	}
+}

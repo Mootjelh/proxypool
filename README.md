@@ -69,6 +69,20 @@ for {
 
 `Load` reads a file of them, skipping blank lines and `#` comments. A line it can't parse is an error naming the line number rather than a silent skip. A proxy list is configuration, and quietly running on nine of ten addresses is worse than not starting at all.
 
+## Changing the list while it runs
+
+Providers hand out a fresh list every so often. `Replace` swaps it and keeps the cooldown of every address that survives:
+
+```go
+if err := pool.Replace(newList); err != nil {
+    return err
+}
+```
+
+Building a second `Pool` would swap the list too, and would forget that four of those addresses were blocked a minute ago. They'd go straight back into rotation, be refused again, and the pool would relearn the same thing on every refresh.
+
+`Add` appends and skips addresses already present, because a duplicate takes a double share of the traffic under round robin. `Remove` drops one. Both refuse a batch containing an unparseable address rather than applying part of it.
+
 ## Two details that are easy to get wrong
 
 ### Logging a pool whose entries share a host
