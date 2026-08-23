@@ -3,6 +3,7 @@ package proxypool_test
 import (
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"time"
 
 	"github.com/Mootjelh/proxypool"
@@ -90,4 +91,74 @@ func ExampleProxy_Transport() {
 
 	// Output:
 	// routing through pool#0 gw.example.com:5555
+}
+
+// A Transport puts the rotation behind net/http, so the rest of the program
+// never mentions proxies again. Each request takes the next address, and one
+// that answers 403 or 429, or cannot be reached at all, is sidelined.
+func ExampleTransport() {
+	// Stands in for a proxy whose address the target has had enough of.
+	refusing := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer refusing.Close()
+
+	pool := proxypool.New([]string{refusing.URL})
+	client := &http.Client{
+		Transport: &proxypool.Transport{Pool: pool, Cooldown: 10 * time.Minute},
+		Timeout:   20 * time.Second,
+	}
+
+	resp, err := client.Get("http://example.invalid/")
+	if err != nil {
+		fmt.Println("error:", err)
+		return
+	}
+	resp.Body.Close()
+
+	fmt.Println("status", resp.StatusCode)
+	fmt.Printf("healthy: %d of %d\n", pool.Healthy(), pool.Len())
+
+	// Output:
+	// status 429
+	// healthy: 0 of 1
+}
+
+// BlockOn decides what counts against an address. Wrap DefaultBlockOn rather
+// than replacing it when the target has a signal of its own on top of the
+// usual ones.
+func ExampleTransport_blockOn() {
+	// This one answers 503 when it does not want an address, which the default
+	// leaves alone because a 503 is normally the origin having a bad minute.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+
+	pool := proxypool.New([]string{server.URL})
+	client := &http.Client{
+		Transport: &proxypool.Transport{
+			Pool: pool,
+			BlockOn: func(resp *http.Response, err error) bool {
+				if proxypool.DefaultBlockOn(resp, err) {
+					return true
+				}
+				return resp != nil && resp.StatusCode == http.StatusServiceUnavailable
+			},
+			Cooldown: 10 * time.Minute,
+		},
+		Timeout: 20 * time.Second,
+	}
+
+	resp, err := client.Get("http://example.invalid/")
+	if err != nil {
+		fmt.Println("error:", err)
+		return
+	}
+	resp.Body.Close()
+
+	fmt.Printf("healthy: %d of %d\n", pool.Healthy(), pool.Len())
+
+	// Output:
+	// healthy: 0 of 1
 }

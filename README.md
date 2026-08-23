@@ -56,6 +56,46 @@ for {
 }
 ```
 
+## Rotating from net/http
+
+The loop above is the same in every project that uses this, so it also comes as an `http.RoundTripper`. Each request takes the next address, and an address that comes back refused is sidelined:
+
+```go
+client := &http.Client{
+    Transport: &proxypool.Transport{Pool: pool, Cooldown: 10 * time.Minute},
+    Timeout:   20 * time.Second,
+}
+
+resp, err := client.Get(target)   // rotation and cooldowns handled
+```
+
+What counts as a failure is your decision, because it depends entirely on the target. The default blocks the address on 403, on 429, and on any transport error including timeouts. It deliberately leaves alone:
+
+* `404` and the rest of 4xx, where the origin answered a question about a URL and the address delivered the request perfectly well
+* `5xx`, because an origin having a bad minute would otherwise sideline your whole pool within seconds, leaving nothing to retry on when it recovers
+* a request you cancelled yourself, which says nothing about the address
+
+Wrap the default rather than replacing it when a target has a signal of its own:
+
+```go
+BlockOn: func(resp *http.Response, err error) bool {
+    if proxypool.DefaultBlockOn(resp, err) {
+        return true
+    }
+    return resp != nil && resp.StatusCode == http.StatusServiceUnavailable
+},
+```
+
+`BlockOn` gets exactly what `RoundTrip` is about to return, so one of the two is always nil. It must not read the body: that body is yours, and a hook that reads it hands you an empty one.
+
+Three things worth knowing before you use it:
+
+* Your own transport. `Base func(Proxy) (http.RoundTripper, error)` is the seam for a browser-grade TLS client, a SOCKS dialer, or anything instrumented. It is called once per address and the result is kept, because rebuilding per request throws away the connection pool and every request then pays a fresh handshake.
+* Redirects spread out. `http.Client` calls `RoundTrip` once per hop, so a redirect chain crosses several addresses. Usually that is the point. If a chain has to stay on one address, follow it yourself.
+* No retry. A failed request comes back as it is, with the address already sidelined so the next attempt lands elsewhere. Retrying inside a RoundTripper means guessing how many attempts you want and whether the body can be replayed, and neither is knowable from in there.
+
+When every address is cooling down the request still goes out, through the one recovering soonest. Sleeping would spend a latency budget you never agreed to, and failing would turn a busy pool into an outage. An empty pool is a different thing and returns `ErrPoolEmpty`, since no amount of waiting produces an address.
+
 ## Input formats
 
 `Normalize` takes what providers hand out:
