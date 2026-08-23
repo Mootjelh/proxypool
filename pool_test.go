@@ -540,3 +540,119 @@ func TestRemoveMatchesVerbatimEntries(t *testing.T) {
 		t.Errorf("Len() = %d, want 1", p.Len())
 	}
 }
+
+// --- stats -------------------------------------------------------------------
+
+func TestStatsCountsHandOutsAndBlocks(t *testing.T) {
+	p := New([]string{"a", "b", "c"})
+
+	// a b c a: a goes out twice, b and c once each.
+	for i := 0; i < 4; i++ {
+		p.Next()
+	}
+	p.Block(Proxy{URL: "b", Index: 1}, time.Hour)
+	p.Block(Proxy{URL: "b", Index: 1}, time.Second) // shorter, still a failure
+
+	stats := p.Stats()
+	if len(stats) != 3 {
+		t.Fatalf("Stats() returned %d entries, want 3", len(stats))
+	}
+
+	byURL := map[string]Stats{}
+	for _, s := range stats {
+		byURL[s.Proxy.URL] = s
+	}
+
+	if got := byURL["a"].HandedOut; got != 2 {
+		t.Errorf("a handed out %d times, want 2", got)
+	}
+	if got := byURL["c"].HandedOut; got != 1 {
+		t.Errorf("c handed out %d times, want 1", got)
+	}
+	if got := byURL["b"].Blocked; got != 2 {
+		t.Errorf("b blocked %d times, want 2: a shorter Block is still a failure", got)
+	}
+	if byURL["b"].CoolingUntil.IsZero() {
+		t.Error("b should be cooling down")
+	}
+	if !byURL["a"].CoolingUntil.IsZero() {
+		t.Error("a is healthy, CoolingUntil should be zero")
+	}
+	if byURL["a"].LastUsed.IsZero() {
+		t.Error("a was handed out, LastUsed should be set")
+	}
+}
+
+// An address that has never been handed out on a running pool usually means the
+// rotation is not reaching it, so it has to be distinguishable from one that
+// has.
+func TestStatsShowsAnAddressThatWasNeverUsed(t *testing.T) {
+	p := New([]string{"a", "b", "c"})
+	p.Next() // a only
+
+	byURL := map[string]Stats{}
+	for _, s := range p.Stats() {
+		byURL[s.Proxy.URL] = s
+	}
+
+	if byURL["a"].LastUsed.IsZero() {
+		t.Error("a was used, LastUsed should be set")
+	}
+	if !byURL["c"].LastUsed.IsZero() {
+		t.Error("c was never used, LastUsed should be zero")
+	}
+	if got := byURL["c"].String(); !strings.Contains(got, "never used") {
+		t.Errorf("String() = %q, want it to say never used", got)
+	}
+}
+
+// An exhausted pool still hands out the address recovering soonest, and that is
+// the one under the most load. Not counting it would hide exactly that.
+func TestStatsCountsHandOutsFromAnExhaustedPool(t *testing.T) {
+	p := New([]string{"a", "b"})
+	p.Block(Proxy{URL: "a", Index: 0}, 2*time.Hour)
+	p.Block(Proxy{URL: "b", Index: 1}, time.Hour)
+
+	for i := 0; i < 3; i++ {
+		if _, healthy := p.Next(); healthy {
+			t.Fatal("expected an exhausted pool")
+		}
+	}
+
+	for _, s := range p.Stats() {
+		if s.Proxy.URL == "b" && s.HandedOut != 3 {
+			t.Errorf("b handed out %d times, want 3", s.HandedOut)
+		}
+	}
+}
+
+// Stats must not leak credentials, for the same reason Proxy.String does not.
+func TestStatsStringHidesCredentials(t *testing.T) {
+	p := New([]string{"http://user:hunter2@gw.example.com:5555"})
+	p.Next()
+
+	got := p.Stats()[0].String()
+	if strings.Contains(got, "hunter2") {
+		t.Errorf("String() leaked the password: %q", got)
+	}
+	if !strings.Contains(got, "gw.example.com:5555") {
+		t.Errorf("String() = %q, want the host in it", got)
+	}
+}
+
+// Block resolves by URL when the index no longer matches. That path used to
+// skip an entry whose cooldown was already longer, walking on to look at the
+// rest of the pool instead of stopping at the address it had found.
+func TestBlockByURLCountsEvenWhenTheCooldownStands(t *testing.T) {
+	p := New([]string{"a", "b"})
+
+	byHand := Proxy{URL: "b", Index: -1} // forces the URL path
+	p.Block(byHand, time.Hour)
+	p.Block(byHand, time.Second) // shorter, must not be dropped on the floor
+
+	for _, s := range p.Stats() {
+		if s.Proxy.URL == "b" && s.Blocked != 2 {
+			t.Errorf("b blocked %d times, want 2", s.Blocked)
+		}
+	}
+}

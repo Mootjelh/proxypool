@@ -83,6 +83,26 @@ Building a second `Pool` would swap the list too, and would forget that four of 
 
 `Add` appends and skips addresses already present, because a duplicate takes a double share of the traffic under round robin. `Remove` drops one. Both refuse a batch containing an unparseable address rather than applying part of it.
 
+## Seeing what the pool is doing
+
+`Len` and `Healthy` give you two numbers, which is not enough to tune anything. `Stats` returns a snapshot per address:
+
+```go
+for _, s := range pool.Stats() {
+    log.Println(s)
+}
+```
+
+```
+pool#0 gw.example.com:5555  out=412 blocked=3
+pool#1 gw.example.com:5555  out=409 blocked=87 cooling 4m20s
+pool#2 gw.example.com:5555  out=0 blocked=0 never used
+```
+
+Providers differ enormously in how often their addresses get refused, so a pool mixing two of them looks fine in aggregate while half of it fails. The middle line above is that half.
+
+`never used` is worth grepping for. An address that has never been handed out on a pool that has been running for hours usually means the rotation is not reaching it.
+
 ## Two details that are easy to get wrong
 
 ### Logging a pool whose entries share a host

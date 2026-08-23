@@ -41,6 +41,10 @@ type Pool struct {
 type entry struct {
 	url          string
 	blockedUntil time.Time
+
+	handedOut int
+	blocked   int
+	lastUsed  time.Time
 }
 
 // Proxy is one address from the pool.
@@ -223,6 +227,8 @@ func (p *Pool) Next() (Proxy, bool) {
 		e := p.entries[idx]
 		p.idx = (p.idx + 1) % n
 		if e.blockedUntil.Before(now) {
+			e.handedOut++
+			e.lastUsed = now
 			return Proxy{URL: e.url, Index: idx}, true
 		}
 	}
@@ -233,6 +239,11 @@ func (p *Pool) Next() (Proxy, bool) {
 			soonest, soonestIdx = e, i+1
 		}
 	}
+	// Counted as a hand-out too. The caller receives this address and may well
+	// use it, so leaving it out would understate exactly the address that is
+	// carrying an exhausted pool.
+	soonest.handedOut++
+	soonest.lastUsed = now
 	return Proxy{URL: soonest.url, Index: soonestIdx}, false
 }
 
@@ -244,20 +255,36 @@ func (p *Pool) Block(pr Proxy, d time.Duration) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	until := time.Now().Add(d)
-	if pr.Index >= 0 && pr.Index < len(p.entries) && p.entries[pr.Index].url == pr.URL {
-		if p.entries[pr.Index].blockedUntil.Before(until) {
-			p.entries[pr.Index].blockedUntil = until
-		}
+	e := p.find(pr)
+	if e == nil {
 		return
 	}
-	// Fall back to matching by URL, so a Proxy built by hand still works.
+
+	// Counted even when the cooldown is not extended. Two failures on one
+	// address are two failures, and that count is the point of the record.
+	e.blocked++
+
+	if until := time.Now().Add(d); e.blockedUntil.Before(until) {
+		e.blockedUntil = until
+	}
+}
+
+// find resolves a Proxy to its entry.
+//
+// The index is checked first and only trusted when the URL at that position
+// still matches, because [Pool.Remove] and [Pool.Replace] can shift an index a
+// caller is holding. Matching by URL is the fallback, and also what makes a
+// Proxy built by hand work.
+func (p *Pool) find(pr Proxy) *entry {
+	if pr.Index >= 0 && pr.Index < len(p.entries) && p.entries[pr.Index].url == pr.URL {
+		return p.entries[pr.Index]
+	}
 	for _, e := range p.entries {
-		if e.url == pr.URL && e.blockedUntil.Before(until) {
-			e.blockedUntil = until
-			return
+		if e.url == pr.URL {
+			return e
 		}
 	}
+	return nil
 }
 
 // --- changing the list ------------------------------------------------------
@@ -397,6 +424,70 @@ func (p *Pool) Healthy() int {
 		}
 	}
 	return count
+}
+
+// Stats is what one address has done. It is a copy, so it can be held, sorted
+// and logged without touching the pool again.
+type Stats struct {
+	Proxy Proxy
+
+	// HandedOut counts every time [Pool.Next] returned this address, including
+	// the times it came back with healthy false. The caller receives it either
+	// way, and leaving those out would understate the address carrying an
+	// exhausted pool.
+	HandedOut int
+
+	// Blocked counts every [Pool.Block] that resolved to this address, whether
+	// or not it extended a cooldown already in place.
+	Blocked int
+
+	// LastUsed is when Next last returned it. Zero means never, which is worth
+	// looking for: an address that has never been handed out on a pool that has
+	// been running for hours is usually a sign the rotation is not reaching it.
+	LastUsed time.Time
+
+	// CoolingUntil is when the current cooldown expires. Zero means healthy.
+	CoolingUntil time.Time
+}
+
+func (s Stats) String() string {
+	out := fmt.Sprintf("%s  out=%d blocked=%d", s.Proxy, s.HandedOut, s.Blocked)
+	if s.LastUsed.IsZero() {
+		out += " never used"
+	}
+	if d := time.Until(s.CoolingUntil); d > 0 {
+		out += fmt.Sprintf(" cooling %s", d.Round(time.Second))
+	}
+	return out
+}
+
+// Stats returns a snapshot per address, in file order.
+//
+// Two counts and a total is not enough to tune a pool. Providers differ
+// enormously in how often their addresses get refused, so a pool mixing two of
+// them looks fine in aggregate while half of it fails. This is the per-address
+// view that shows which half.
+func (p *Pool) Stats() []Stats {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	now := time.Now()
+	out := make([]Stats, 0, len(p.entries))
+	for i, e := range p.entries {
+		s := Stats{
+			Proxy:     Proxy{URL: e.url, Index: i},
+			HandedOut: e.handedOut,
+			Blocked:   e.blocked,
+			LastUsed:  e.lastUsed,
+		}
+		// An expired cooldown is reported as healthy rather than as a past
+		// timestamp, so a caller does not have to compare against the clock.
+		if e.blockedUntil.After(now) {
+			s.CoolingUntil = e.blockedUntil
+		}
+		out = append(out, s)
+	}
+	return out
 }
 
 // All returns every proxy in the pool, in file order, regardless of cooldown.
