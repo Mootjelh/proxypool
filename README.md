@@ -128,7 +128,26 @@ before   addresses 0-99 carried every request, the other 900 carried none
 after    all 1000 carried their share
 ```
 
-Round robin itself was never the problem. Over a long-lived pool it is exact: 1000 addresses, 100,000 draws, every address handed out exactly 100 times, and blocking does not distort it either.
+Round robin itself was never the problem. Over a long-lived pool it is exact: 1000 addresses, 100,000 draws, every address handed out exactly 100 times, and blocking does not distort it either. What went wrong was only ever where the rotation started.
+
+## Where the rotation starts
+
+`New` starts at a random address rather than the first one. A process restarts on every deploy and every crash, and starting at the head each time means those runs draw the same addresses in the same order. Measured over 200 restarts of a 1000-address pool taking 3 requests each:
+
+```
+before   3 addresses carried all 600 requests, 997 carried none
+after    the starting point moves, so restarts spread across the pool
+```
+
+Only the starting point is random. The order is still the file order and an address keeps its index, because `Stats` is worth nothing if a row can't be matched back to a line in your list.
+
+When you want a fixed starting point, say so:
+
+```go
+pool.Rotate(0)
+```
+
+That is what the examples and tests here do, and it is also how to carry a position across a restart if you keep one somewhere.
 
 `Add` appends and skips addresses already present, because a duplicate takes a double share of the traffic under round robin. `Remove` drops one. Both refuse a batch containing an unparseable address rather than applying part of it.
 

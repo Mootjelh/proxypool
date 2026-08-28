@@ -82,8 +82,12 @@ func TestNormalize(t *testing.T) {
 	}
 }
 
+// The promise is the cycle, not where it starts. New picks a random starting
+// address on purpose, so asserting that the first draw is "a" would be testing
+// the offset instead of the rotation.
 func TestRoundRobin(t *testing.T) {
-	p := New([]string{"a", "b", "c"})
+	list := []string{"a", "b", "c"}
+	p := New(list)
 
 	var got []string
 	for i := 0; i < 6; i++ {
@@ -94,22 +98,79 @@ func TestRoundRobin(t *testing.T) {
 		got = append(got, pr.URL)
 	}
 
-	want := []string{"a", "b", "c", "a", "b", "c"}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("rotation = %v, want %v", got, want)
+	start := indexOf(list, got[0])
+	if start < 0 {
+		t.Fatalf("first draw %q is not in the list", got[0])
+	}
+	for i, u := range got {
+		if want := list[(start+i)%len(list)]; u != want {
+			t.Fatalf("rotation = %v, want it to cycle the list from %q", got, got[0])
 		}
 	}
 }
 
-func TestIndexIsStable(t *testing.T) {
+// Pinning the start makes the sequence exact, which is what a caller needs when
+// it wants to know what comes next.
+func TestRotatePinsTheStartingPoint(t *testing.T) {
 	p := New([]string{"a", "b", "c"})
+
+	for _, start := range []int{0, 2, 1, 5, -1} {
+		p.Rotate(start)
+		pr, healthy := p.Next()
+		if !healthy {
+			t.Fatalf("Rotate(%d): expected a healthy proxy", start)
+		}
+		want := ((start % 3) + 3) % 3
+		if pr.Index != want {
+			t.Errorf("after Rotate(%d) the next draw was index %d, want %d", start, pr.Index, want)
+		}
+	}
+}
+
+// The starting point has to move between processes, or a restart draws the same
+// addresses in the same order every time. Measured before this changed: 200
+// restarts of a 1000-address pool taking 3 requests each used 3 addresses.
+func TestNewDoesNotAlwaysStartAtTheSameAddress(t *testing.T) {
+	const n = 50
+	list := make([]string, n)
+	for i := range list {
+		list[i] = fmt.Sprintf("h%d:1", i)
+	}
+
+	seen := map[int]bool{}
+	for restart := 0; restart < 200; restart++ {
+		p := New(list)
+		pr, _ := p.Next()
+		seen[pr.Index] = true
+	}
+
+	// 200 starts over 50 addresses. Any fixed starting point gives 1. Asking
+	// for a third of them is far enough below the expectation to not flake and
+	// far enough above 1 to catch the bug.
+	if len(seen) < n/3 {
+		t.Errorf("200 fresh pools started at %d distinct addresses out of %d, want the starting point to move", len(seen), n)
+	}
+}
+
+func indexOf(list []string, want string) int {
+	for i, u := range list {
+		if u == want {
+			return i
+		}
+	}
+	return -1
+}
+
+// Whatever the rotation hands out, the index has to match where that address
+// sits in the list, or Stats cannot be read back against the file.
+func TestIndexIsStable(t *testing.T) {
+	list := []string{"a", "b", "c"}
+	p := New(list)
 
 	for i := 0; i < 6; i++ {
 		pr, _ := p.Next()
-		want := i % 3
-		if pr.Index != want {
-			t.Errorf("iteration %d: Index = %d, want %d", i, pr.Index, want)
+		if pr.Index < 0 || pr.Index >= len(list) || list[pr.Index] != pr.URL {
+			t.Errorf("draw %d: %q came back with index %d, which is not where it sits in %v", i, pr.URL, pr.Index, list)
 		}
 	}
 }
@@ -424,6 +485,7 @@ func TestRemovingTheLastEntryDoesNotPanic(t *testing.T) {
 // innocent one goes quiet.
 func TestAHeldProxyStillBlocksItsOwnAddress(t *testing.T) {
 	p := New([]string{"a", "b", "c"})
+	p.Rotate(0) // the fixture below names specific addresses
 
 	p.Next()            // a
 	held, _ := p.Next() // b, at index 1
@@ -452,6 +514,7 @@ func TestAHeldProxyStillBlocksItsOwnAddress(t *testing.T) {
 
 func TestReplaceKeepsCooldowns(t *testing.T) {
 	p := New([]string{"http://a:1", "http://b:1", "http://c:1"})
+	p.Rotate(0) // so the draw below is a, and the comments mean what they say
 
 	pr, _ := p.Next() // a
 	p.Block(pr, time.Hour)
@@ -547,6 +610,8 @@ func TestRemoveMatchesVerbatimEntries(t *testing.T) {
 func TestStatsCountsHandOutsAndBlocks(t *testing.T) {
 	p := New([]string{"a", "b", "c"})
 
+	p.Rotate(0)
+
 	// a b c a: a goes out twice, b and c once each.
 	for i := 0; i < 4; i++ {
 		p.Next()
@@ -589,6 +654,7 @@ func TestStatsCountsHandOutsAndBlocks(t *testing.T) {
 // has.
 func TestStatsShowsAnAddressThatWasNeverUsed(t *testing.T) {
 	p := New([]string{"a", "b", "c"})
+	p.Rotate(0)
 	p.Next() // a only
 
 	byURL := map[string]Stats{}
@@ -666,6 +732,7 @@ func TestBlockByURLCountsEvenWhenTheCooldownStands(t *testing.T) {
 func TestReplaceKeepsTheRotationGoing(t *testing.T) {
 	list := []string{"a:1", "b:1", "c:1", "d:1", "e:1", "f:1"}
 	p := New(mustNormalize(t, list))
+	p.Rotate(0)
 
 	// Three draws, so the rotation sits at index 3.
 	for i := 0; i < 3; i++ {

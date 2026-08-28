@@ -23,6 +23,11 @@ func Example() {
 		"http://sess-c:pw@gw.example.com:5555",
 	})
 
+	// New starts at a random address, so that a process restarting does not
+	// draw the same ones every time. Pin it here so this example has a fixed
+	// answer to print.
+	pool.Rotate(0)
+
 	for i := 0; i < 4; i++ {
 		p, healthy := pool.Next()
 		if !healthy {

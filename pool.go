@@ -22,6 +22,7 @@ package proxypool
 import (
 	"bufio"
 	"fmt"
+	"math/rand"
 	"net/http"
 	neturl "net/url"
 	"os"
@@ -94,6 +95,17 @@ func (p Proxy) Transport() (*http.Transport, error) {
 // An empty slice, or a slice containing one empty string, means "connect
 // directly", so a caller that has no proxies configured can use the same code
 // path as one that does, rather than branching everywhere.
+//
+// The rotation starts at a random address rather than the first one. A process
+// that restarts, which is every deploy and every crash, would otherwise draw
+// the same addresses in the same order each time: measured over 200 restarts of
+// a 1000-address pool taking 3 requests each, three addresses carried all 600
+// requests and the other 997 carried none. Use [Pool.Rotate] when a fixed
+// starting point is wanted.
+//
+// Only the starting point is random. The order is the file order, and an
+// address keeps its index, because [Pool.Stats] is worth nothing if a row
+// cannot be matched back to a line in the list.
 func New(urls []string) *Pool {
 	if len(urls) == 0 {
 		urls = []string{""}
@@ -102,7 +114,7 @@ func New(urls []string) *Pool {
 	for _, u := range urls {
 		entries = append(entries, &entry{url: u})
 	}
-	return &Pool{entries: entries}
+	return &Pool{entries: entries, idx: rand.Intn(len(entries))}
 }
 
 // Load reads a proxy list from disk, one entry per line, and normalises each
@@ -245,6 +257,24 @@ func (p *Pool) Next() (Proxy, bool) {
 	soonest.handedOut++
 	soonest.lastUsed = now
 	return Proxy{URL: soonest.url, Index: soonestIdx}, false
+}
+
+// Rotate moves the rotation so that the next draw is the address at index i,
+// counting from 0 in file order. Out of range values wrap.
+//
+// [New] picks a random starting point, which is right for a long-running
+// process and wrong for a test that wants to know what comes next. This is the
+// way to pin it. It is also how to carry a position across a restart, if the
+// caller keeps one somewhere.
+func (p *Pool) Rotate(i int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if len(p.entries) == 0 {
+		p.idx = 0
+		return
+	}
+	p.idx = ((i % len(p.entries)) + len(p.entries)) % len(p.entries)
 }
 
 // Block sidelines a proxy for the given duration after it was throttled.

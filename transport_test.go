@@ -100,6 +100,7 @@ func send(t *testing.T, tr *Transport) {
 
 func TestTransportRotatesPerRequest(t *testing.T) {
 	pool := New([]string{"http://a:1", "http://b:2", "http://c:3"})
+	pool.Rotate(0) // New starts somewhere random, and this test wants an exact order
 	rec := newRecorder(200)
 	tr := &Transport{Pool: pool, Base: rec.base}
 
@@ -116,6 +117,7 @@ func TestTransportRotatesPerRequest(t *testing.T) {
 
 func TestTransportBlocksTheAddressThatFailed(t *testing.T) {
 	pool := New([]string{"http://a:1", "http://b:2"})
+	pool.Rotate(0) // so the request below really does land on a
 	rec := newRecorder(http.StatusForbidden)
 	tr := &Transport{Pool: pool, Base: rec.base, Cooldown: time.Hour}
 
@@ -364,6 +366,7 @@ func TestTransportBlocksAnAddressThatCannotBeReached(t *testing.T) {
 	defer live.Close()
 
 	pool := New([]string{deadURL, live.URL})
+	pool.Rotate(0) // so the first request is the one that goes to the dead address
 	client := &http.Client{Transport: &Transport{Pool: pool, Cooldown: time.Hour}, Timeout: 10 * time.Second}
 
 	// The first request goes to the dead address and fails.
