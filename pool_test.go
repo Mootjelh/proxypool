@@ -1,6 +1,7 @@
 package proxypool
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -655,4 +656,95 @@ func TestBlockByURLCountsEvenWhenTheCooldownStands(t *testing.T) {
 			t.Errorf("b blocked %d times, want 2", s.Blocked)
 		}
 	}
+}
+
+// Replace is for a provider that hands out a fresh list on a timer, so it runs
+// again and again in one process. Resetting the rotation there sent every
+// refresh back to the head of the list: measured on a pool of 1000 refreshed
+// every 30 minutes with 100 draws in between, addresses 0 to 99 carried every
+// request of the day and the other 900 carried none.
+func TestReplaceKeepsTheRotationGoing(t *testing.T) {
+	list := []string{"a:1", "b:1", "c:1", "d:1", "e:1", "f:1"}
+	p := New(mustNormalize(t, list))
+
+	// Three draws, so the rotation sits at index 3.
+	for i := 0; i < 3; i++ {
+		p.Next()
+	}
+	if err := p.Replace(list); err != nil {
+		t.Fatal(err)
+	}
+
+	pr, healthy := p.Next()
+	if !healthy {
+		t.Fatal("expected a healthy proxy")
+	}
+	if pr.URL != "http://d:1" {
+		t.Errorf("after Replace the rotation handed out %q, want %q. Going back to the head is what leaves most of a pool unused", pr.URL, "http://d:1")
+	}
+}
+
+// Over a day of refreshes the whole pool should be reached, not the first
+// slice of it. This is the measurement from the issue, shrunk to a test.
+func TestReplaceReachesTheWholePool(t *testing.T) {
+	const n = 50
+	list := make([]string, n)
+	for i := range list {
+		list[i] = fmt.Sprintf("h%d:1", i)
+	}
+
+	p := New(mustNormalize(t, list))
+	seen := map[string]bool{}
+	for refresh := 0; refresh < 12; refresh++ {
+		for i := 0; i < 5; i++ { // fewer draws per period than the pool is long
+			pr, _ := p.Next()
+			seen[pr.URL] = true
+		}
+		if err := p.Replace(list); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// 12 refreshes of 5 draws is 60 draws over 50 addresses, so every one
+	// should have been handed out at least once.
+	if len(seen) != n {
+		t.Errorf("reached %d of %d addresses over 60 draws, want all of them", len(seen), n)
+	}
+}
+
+// A shorter list must not leave the rotation pointing past the end.
+func TestReplaceWithAShorterListStaysInRange(t *testing.T) {
+	p := New(mustNormalize(t, []string{"a:1", "b:1", "c:1", "d:1", "e:1"}))
+	for i := 0; i < 4; i++ {
+		p.Next()
+	}
+
+	if err := p.Replace([]string{"x:1", "y:1"}); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 4; i++ {
+		pr, healthy := p.Next()
+		if !healthy {
+			t.Fatalf("draw %d: expected a healthy proxy", i)
+		}
+		if pr.URL != "http://x:1" && pr.URL != "http://y:1" {
+			t.Fatalf("draw %d handed out %q, which is not in the new list", i, pr.URL)
+		}
+	}
+}
+
+// mustNormalize puts a list through Normalize, so a pool built with New holds
+// the same strings Replace would produce. Without it the two disagree and a
+// surviving address looks like a new one.
+func mustNormalize(t *testing.T, raw []string) []string {
+	t.Helper()
+	out := make([]string, len(raw))
+	for i, r := range raw {
+		u, err := Normalize(r)
+		if err != nil {
+			t.Fatalf("Normalize(%q): %v", r, err)
+		}
+		out[i] = u
+	}
+	return out
 }

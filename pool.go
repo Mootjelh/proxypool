@@ -386,7 +386,23 @@ func (p *Pool) Replace(raw []string) error {
 	}
 
 	p.entries = entries
-	p.idx = 0
+
+	// The rotation position is kept, not reset.
+	//
+	// Resetting it sends the next draw back to the head of the list, and
+	// Replace is built for a provider that hands out a fresh list on a timer,
+	// so it happens over and over in one process. Measured on a pool of 1000
+	// refreshed every 30 minutes with 100 requests in between: addresses 0 to
+	// 99 carried every request of the day and the other 900 carried none.
+	//
+	// It is a position in the rotation and not an identity, so it does not
+	// matter that the address it points at may have changed. It only has to
+	// stay in range.
+	if len(p.entries) > 0 {
+		p.idx %= len(p.entries)
+	} else {
+		p.idx = 0
+	}
 	return nil
 }
 
